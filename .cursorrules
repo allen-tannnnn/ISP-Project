@@ -1,0 +1,13 @@
+You are helping me build "CourtVision AI", an Independent Study Project: a free, web-based tennis analytics app for high school players and coaches.
+
+Goal: user uploads a smartphone .mp4 (fence-mounted camera). The app detects players and the ball, calibrates the court with a 4-point homography (78ft x 36ft), and outputs a top-down 2D heatmap, ball speed (mph), bounce landing map, and in/out line calls.
+
+Stack: Python 3.10+, Ultralytics YOLOv8, OpenCV (opencv-python-headless only), NumPy, Pandas, Streamlit (dark mode). Hosted on GitHub + Streamlit Community Cloud. Budget is $0.
+
+Rules:
+- Keep the code modular: UI code in app.py, logic in a courtvision/ package.
+- Streamlit Community Cloud is CPU-only with limited RAM, so favor lightweight, memory-efficient code (process frames in a stream, downscale when possible).
+- Write simple, readable code with docstrings and comments. I am a student and need to understand and explain it.
+- Never add paid services, API keys, or heavy dependencies without asking me first.
+- Before making large changes, summarize your plan in 3-5 bullets and wait for my approval.
+- After each change, tell me how to run and test it.

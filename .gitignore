@@ -1,0 +1,43 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Large video files (keep folder placeholders)
+data/**/*.mp4
+data/**/*.mov
+data/**/*.avi
+data/**/*.mkv
+data/**/*.webm
+data/**/*.m4v
+data/sample_clips/*
+!data/sample_clips/.gitkeep
+
+# Model weights (keep a small folder placeholder)
+*.pt
+*.pth
+*.onnx
+*.engine
+models/*
+!models/.gitkeep
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
