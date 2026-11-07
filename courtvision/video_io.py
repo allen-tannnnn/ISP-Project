@@ -40,13 +40,17 @@ class VideoMeta:
 
 
 @contextmanager
-def save_upload(uploaded_file: BinaryIO) -> Iterator[Path]:
+def save_upload(
+    uploaded_file: BinaryIO,
+    delete_on_exit: bool = True,
+) -> Iterator[Path]:
     """Write an uploaded clip to a temp file and delete it afterwards.
 
     ``uploaded_file`` is anything with ``read()`` and ``seek()``, such as
     a Streamlit ``UploadedFile``. The path is yielded only after the bytes
-    are on disk. The temp file is removed when the ``with`` block ends,
-    including when an error is raised.
+    are on disk. By default, the temp file is removed when the ``with``
+    block ends. Set ``delete_on_exit=False`` to keep a successfully saved
+    upload; incomplete or failed saves are always removed.
 
     Raises:
         VideoReadError: the upload was empty.
@@ -57,6 +61,7 @@ def save_upload(uploaded_file: BinaryIO) -> Iterator[Path]:
     # delete=False so Windows can reopen the path after we close this handle.
     handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     tmp_path = Path(handle.name)
+    completed = False
     try:
         uploaded_file.seek(0)
         while True:
@@ -71,9 +76,11 @@ def save_upload(uploaded_file: BinaryIO) -> Iterator[Path]:
                 "The uploaded file is empty. Choose a short .mp4 clip and try again."
             )
         yield tmp_path
+        completed = True
     finally:
         handle.close()
-        tmp_path.unlink(missing_ok=True)
+        if delete_on_exit or not completed:
+            tmp_path.unlink(missing_ok=True)
 
 
 def open_video(path: str | Path) -> tuple[cv2.VideoCapture, VideoMeta]:
@@ -136,6 +143,38 @@ def open_video(path: str | Path) -> tuple[cv2.VideoCapture, VideoMeta]:
         duration_sec=frame_count / fps,
     )
     return capture, meta
+
+
+def get_frame(path: str | Path, frame_index: int) -> np.ndarray:
+    """Read one frame from a video without loading the whole clip.
+
+    Raises:
+        ValueError: ``frame_index`` is negative.
+        VideoReadError: the video cannot be opened, sought, or read at the
+            requested frame.
+    """
+    if frame_index < 0:
+        raise ValueError("frame_index must be 0 or greater.")
+
+    capture = cv2.VideoCapture(str(path))
+    try:
+        if not capture.isOpened():
+            raise VideoReadError(
+                f"Could not open video to read frame {frame_index}."
+            )
+        if not capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index):
+            raise VideoReadError(
+                f"Could not seek to frame {frame_index} in the video."
+            )
+
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            raise VideoReadError(
+                f"Could not read frame {frame_index} from the video."
+            )
+        return frame
+    finally:
+        capture.release()
 
 
 def _downscale(frame: np.ndarray, max_side: int) -> np.ndarray:
