@@ -8,8 +8,17 @@ calling, and heatmap modules into a single interactive workflow.
 from pathlib import Path
 
 import cv2
+import numpy as np
 import streamlit as st
+from streamlit_image_coordinates import streamlit_image_coordinates
 
+from courtvision.calibration import (
+    DEFAULT_REFERENCE_PRESET,
+    REFERENCE_POINT_PRESETS,
+    compute_homography,
+    get_reference_points,
+    reprojection_error,
+)
 from courtvision.video_io import (
     VideoReadError,
     get_frame,
@@ -133,6 +142,132 @@ else:
             details_column.metric(
                 "Timestamp", f"{frame_index / metadata.fps:.2f} sec"
             )
+
+            st.subheader("Calibration")
+            preset_names = list(REFERENCE_POINT_PRESETS)
+            selected_preset = st.selectbox(
+                "Reference-point preset",
+                options=preset_names,
+                index=preset_names.index(DEFAULT_REFERENCE_PRESET),
+                format_func=lambda name: name.replace("_", " "),
+                key="calibration_preset",
+            )
+            calibration_context = (video_path, frame_index, selected_preset)
+            if st.session_state.get("calibration_context") != calibration_context:
+                st.session_state["calibration_context"] = calibration_context
+                st.session_state["calibration_points"] = []
+                st.session_state.pop("calibration_homography", None)
+                st.session_state.pop("calibration_error", None)
+
+            calibration_points = st.session_state.setdefault(
+                "calibration_points", []
+            )
+            reset_column, instruction_column = st.columns([1, 4])
+            if reset_column.button("Reset calibration", key="reset_calibration"):
+                calibration_points.clear()
+                st.session_state.pop("calibration_homography", None)
+                st.session_state.pop("calibration_error", None)
+
+            corner_order = ("near-left", "near-right", "far-right", "far-left")
+            if len(calibration_points) < len(corner_order):
+                next_corner = corner_order[len(calibration_points)]
+                instruction_column.info(
+                    f"Click the {next_corner} corner for the "
+                    f"{selected_preset.replace('_', ' ')} preset."
+                )
+            else:
+                instruction_column.success("All four court corners are selected.")
+
+            original_height, original_width = frame_bgr.shape[:2]
+            displayed_width = min(original_width, 800)
+            scale = displayed_width / original_width
+            displayed_height = max(1, round(original_height * scale))
+            if displayed_width == original_width:
+                displayed_frame = frame_bgr.copy()
+            else:
+                displayed_frame = cv2.resize(
+                    frame_bgr,
+                    (displayed_width, displayed_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+
+            for point_number, (pixel_x, pixel_y) in enumerate(
+                calibration_points, start=1
+            ):
+                marker_x = round(pixel_x * scale)
+                marker_y = round(pixel_y * scale)
+                cv2.circle(
+                    displayed_frame,
+                    (marker_x, marker_y),
+                    12,
+                    (0, 0, 255),
+                    thickness=2,
+                )
+                cv2.putText(
+                    displayed_frame,
+                    str(point_number),
+                    (marker_x + 14, marker_y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 255),
+                    thickness=2,
+                    lineType=cv2.LINE_AA,
+                )
+
+            click = streamlit_image_coordinates(
+                cv2.cvtColor(displayed_frame, cv2.COLOR_BGR2RGB),
+                width=displayed_width,
+                height=displayed_height,
+                key="calibration_image",
+                cursor="crosshair",
+            )
+            if isinstance(click, dict) and all(
+                key in click for key in ("x", "y", "unix_time")
+            ):
+                click_signature = (click["unix_time"], click["x"], click["y"])
+                if click_signature != st.session_state.get(
+                    "calibration_last_click"
+                ):
+                    st.session_state["calibration_last_click"] = click_signature
+                    if len(calibration_points) < len(corner_order):
+                        calibration_points.append(
+                            (
+                                float(click["x"]) / scale,
+                                float(click["y"]) / scale,
+                            )
+                        )
+                        st.rerun()
+
+            if len(calibration_points) == len(corner_order):
+                court_points = get_reference_points(selected_preset)
+                try:
+                    homography = compute_homography(
+                        calibration_points,
+                        court_points,
+                    )
+                except ValueError as error:
+                    st.session_state.pop("calibration_homography", None)
+                    st.session_state["calibration_error"] = str(error)
+                    st.error(str(error))
+                else:
+                    st.session_state["calibration_homography"] = homography
+                    st.session_state.pop("calibration_error", None)
+                    mean_error, max_error = reprojection_error(
+                        homography,
+                        calibration_points,
+                        court_points,
+                    )
+                    with st.expander("Homography matrix"):
+                        st.code(np.array2string(homography, precision=6))
+                    mean_column, max_column = st.columns(2)
+                    mean_column.metric(
+                        "Mean reprojection error",
+                        f"{mean_error:.2f} px",
+                    )
+                    max_column.metric(
+                        "Maximum reprojection error",
+                        f"{max_error:.2f} px",
+                    )
 
         uploaded_clip.seek(0)
         st.video(uploaded_clip)
