@@ -242,3 +242,69 @@ def reprojection_error(
     reprojected = court_to_pixel(H, court)
     errors = np.linalg.norm(reprojected - pixels, axis=1)
     return float(np.mean(errors)), float(np.max(errors))
+
+
+def draw_court_overlay(
+    frame_bgr: np.ndarray,
+    H: np.ndarray,
+    color: tuple[int, int, int] = (0, 255, 255),
+    thickness: int = 2,
+    show_labels: bool = True,
+) -> np.ndarray:
+    """Draw projected court lines on a copy of a BGR frame.
+
+    Court line endpoints are mapped from feet to pixels using ``H``. Segments
+    with non-finite endpoints or endpoints farther than about five frame
+    dimensions beyond the image are skipped. Set ``show_labels`` to ``False``
+    to omit the court-line names.
+    """
+    overlay = frame_bgr.copy()
+    height, width = overlay.shape[:2]
+    matrix = _validate_homography(H)
+    try:
+        np.linalg.inv(matrix)
+    except np.linalg.LinAlgError as error:
+        raise ValueError("H cannot be inverted to draw the court overlay.") from error
+
+    for name, endpoints in COURT_LINES.items():
+        try:
+            pixel_endpoints = [
+                court_to_pixel(matrix, endpoint) for endpoint in endpoints
+            ]
+        except ValueError as error:
+            if "could not be mapped to finite pixel coordinates" in str(error):
+                continue
+            raise
+
+        if not all(np.isfinite(point).all() for point in pixel_endpoints):
+            continue
+        if any(
+            point[0] < -5 * width
+            or point[0] > 6 * width
+            or point[1] < -5 * height
+            or point[1] > 6 * height
+            for point in pixel_endpoints
+        ):
+            continue
+
+        first = tuple(int(round(value)) for value in pixel_endpoints[0])
+        second = tuple(int(round(value)) for value in pixel_endpoints[1])
+        cv2.line(overlay, first, second, color, thickness, cv2.LINE_AA)
+
+        if show_labels:
+            midpoint = (
+                round((first[0] + second[0]) / 2),
+                round((first[1] + second[1]) / 2),
+            )
+            cv2.putText(
+                overlay,
+                name,
+                midpoint,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                color,
+                thickness=1,
+                lineType=cv2.LINE_AA,
+            )
+
+    return overlay

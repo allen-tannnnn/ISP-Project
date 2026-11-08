@@ -5,6 +5,7 @@ import pytest
 from courtvision.calibration import (
     compute_homography,
     court_to_pixel,
+    draw_court_overlay,
     get_reference_points,
     pixel_to_court,
     reprojection_error,
@@ -114,3 +115,14 @@ def test_compute_homography_rejects_invalid_pixel_points(pixel_points):
 def test_court_to_pixel_rejects_singular_homography():
     with pytest.raises(ValueError, match="inverted"):
         court_to_pixel(np.zeros((3, 3)), (0.0, 0.0))
+
+
+def test_draw_court_overlay_preserves_input_and_draws_on_copy():
+    frame = np.zeros((800, 1200, 3), dtype=np.uint8)
+    original = frame.copy()
+
+    overlay = draw_court_overlay(frame, HOMOGRAPHY)
+
+    assert overlay.shape == frame.shape
+    np.testing.assert_array_equal(frame, original)
+    assert np.any(overlay != frame)

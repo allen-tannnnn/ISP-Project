@@ -16,6 +16,7 @@ from courtvision.calibration import (
     DEFAULT_REFERENCE_PRESET,
     REFERENCE_POINT_PRESETS,
     compute_homography,
+    draw_court_overlay,
     get_reference_points,
     reprojection_error,
 )
@@ -268,6 +269,40 @@ else:
                         "Maximum reprojection error",
                         f"{max_error:.2f} px",
                     )
+                    st.subheader("Calibration check")
+                    show_line_labels = st.checkbox(
+                        "Show line labels",
+                        value=False,
+                        key="show_calibration_line_labels",
+                    )
+                    overlay_bgr = draw_court_overlay(
+                        frame_bgr,
+                        st.session_state["calibration_homography"],
+                        show_labels=show_line_labels,
+                    )
+                    st.image(
+                        cv2.cvtColor(overlay_bgr, cv2.COLOR_BGR2RGB),
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        "The lines should sit on the real court lines, including "
+                        "the net, service lines, and doubles sidelines, which you "
+                        "did NOT click. If they drift or look twisted, press Reset "
+                        "and re-click, in order: near-left, near-right, far-right, "
+                        "far-left."
+                    )
+                    match_status = st.radio(
+                        "Do the lines match the real court?",
+                        ("Not checked", "Yes", "No"),
+                        key="calibration_match_status",
+                    )
+                    if match_status == "Yes":
+                        st.success("The calibration lines match the real court.")
+                    elif match_status == "No":
+                        st.warning(
+                            "Likely causes: wrong click order, imprecise clicks "
+                            "(zoom in), or camera lens distortion."
+                        )
 
         uploaded_clip.seek(0)
         st.video(uploaded_clip)
