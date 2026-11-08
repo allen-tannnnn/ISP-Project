@@ -25,6 +25,7 @@ from courtvision.calibration import (
     pixel_to_court,
     reprojection_error,
 )
+from courtvision.detection import PlayerDetector
 from courtvision.video_io import (
     VideoReadError,
     get_frame,
@@ -40,6 +41,14 @@ MAX_CLIP_SECONDS = 30
 @st.cache_data(max_entries=16, show_spinner=False)
 def _cached_get_frame(path: str, frame_index: int):
     return get_frame(path, frame_index)
+
+
+@st.cache_resource(show_spinner=False)
+def _cached_player_detector(
+    model_name: str = "yolov8n.pt",
+    conf: float = 0.4,
+) -> PlayerDetector:
+    return PlayerDetector(model_name=model_name, conf=conf)
 
 
 st.set_page_config(

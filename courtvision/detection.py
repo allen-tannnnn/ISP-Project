@@ -1,5 +1,100 @@
-"""Player and ball detection.
+"""Player detection and court-position filtering."""
 
-Future responsibility: run object detection on video frames to locate
-the tennis ball and players, returning bounding boxes or keypoints.
-"""
+from collections.abc import Sequence
+from typing import TypedDict
+
+import numpy as np
+
+from courtvision.calibration import pixel_to_court
+
+
+class PlayerDetection(TypedDict):
+    bbox: tuple[float, float, float, float]
+    confidence: float
+    foot_point: tuple[float, float]
+
+
+class CourtPlayerDetection(PlayerDetection):
+    court_point: tuple[float, float]
+
+
+class PlayerDetector:
+    """Detect people in video frames with an Ultralytics YOLO model."""
+
+    def __init__(self, model_name: str = "yolov8n.pt", conf: float = 0.4):
+        try:
+            from ultralytics import YOLO
+        except ImportError as error:
+            raise RuntimeError(
+                "Player detection requires the Ultralytics package."
+            ) from error
+
+        try:
+            self.model = YOLO(model_name)
+        except Exception as error:
+            raise RuntimeError(
+                f"Failed to load YOLO model {model_name!r}: {error}"
+            ) from error
+        self.conf = conf
+
+    def detect_players(self, frame_bgr: np.ndarray) -> list[PlayerDetection]:
+        """Return person detections with bbox and foot point in frame pixels."""
+        if (
+            not isinstance(frame_bgr, np.ndarray)
+            or frame_bgr.ndim != 3
+            or frame_bgr.shape[0] == 0
+            or frame_bgr.shape[1] == 0
+            or frame_bgr.shape[2] != 3
+        ):
+            raise ValueError("frame_bgr must be a non-empty BGR image.")
+
+        results = self.model.predict(
+            source=frame_bgr,
+            conf=self.conf,
+            classes=[0],
+            imgsz=640,
+            device="cpu",
+            verbose=False,
+        )
+        detections: list[PlayerDetection] = []
+        for result in results:
+            if result.boxes is None:
+                continue
+            for box in result.boxes:
+                if int(box.cls[0]) != 0:
+                    continue
+                x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
+                detections.append(
+                    {
+                        "bbox": (x1, y1, x2, y2),
+                        "confidence": float(box.conf[0]),
+                        "foot_point": ((x1 + x2) / 2.0, y2),
+                    }
+                )
+        return detections
+
+
+def filter_on_court(
+    detections: Sequence[PlayerDetection],
+    H: np.ndarray,
+    margin_ft: float = 6,
+) -> list[CourtPlayerDetection]:
+    """Map player foot points to court feet and discard positions off-court."""
+    if not np.isfinite(margin_ft) or margin_ft < 0:
+        raise ValueError("margin_ft must be a finite nonnegative number.")
+
+    kept: list[CourtPlayerDetection] = []
+    for detection in detections:
+        court_point = pixel_to_court(H, detection["foot_point"])
+        court_x, court_y = float(court_point[0]), float(court_point[1])
+        if (
+            -margin_ft <= court_x <= 36.0 + margin_ft
+            and -margin_ft <= court_y <= 78.0 + margin_ft
+        ):
+            kept.append(
+                {
+                    **detection,
+                    "court_point": (court_x, court_y),
+                }
+            )
+    return kept
