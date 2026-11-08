@@ -25,7 +25,7 @@ from courtvision.calibration import (
     pixel_to_court,
     reprojection_error,
 )
-from courtvision.detection import PlayerDetector
+from courtvision.detection import PlayerDetector, filter_on_court
 from courtvision.video_io import (
     VideoReadError,
     get_frame,
@@ -223,7 +223,6 @@ else:
                             st.session_state["calibration_preset"] = saved_preset
                             st.session_state["calibration_context"] = (
                                 video_path,
-                                frame_index,
                                 saved_preset,
                             )
                             st.session_state["click_test_points"] = []
@@ -250,12 +249,14 @@ else:
                 format_func=lambda name: name.replace("_", " "),
                 key="calibration_preset",
             )
-            calibration_context = (video_path, frame_index, selected_preset)
+            calibration_context = (video_path, selected_preset)
             if st.session_state.get("calibration_context") != calibration_context:
                 st.session_state["calibration_context"] = calibration_context
                 st.session_state["calibration_points"] = []
                 st.session_state.pop("calibration_court_points", None)
                 st.session_state.pop("calibration_homography", None)
+                st.session_state.pop("player_detection_result", None)
+                st.session_state.pop("calibration_frame_index", None)
                 st.session_state.pop("calibration_error", None)
                 st.session_state["click_test_points"] = []
                 feedback = st.session_state.get("calibration_load_feedback")
@@ -270,6 +271,8 @@ else:
                 calibration_points.clear()
                 st.session_state.pop("calibration_court_points", None)
                 st.session_state.pop("calibration_homography", None)
+                st.session_state.pop("player_detection_result", None)
+                st.session_state.pop("calibration_frame_index", None)
                 st.session_state.pop("calibration_error", None)
                 st.session_state["click_test_points"] = []
                 feedback = st.session_state.get("calibration_load_feedback")
@@ -285,6 +288,12 @@ else:
                 )
             else:
                 instruction_column.success("All four court corners are selected.")
+
+            calibration_frame_index = st.session_state.get(
+                "calibration_frame_index"
+            )
+            if calibration_frame_index is not None:
+                st.caption(f"Calibration frame: {calibration_frame_index}")
 
             original_height, original_width = frame_bgr.shape[:2]
             displayed_width = min(original_width, 800)
@@ -338,6 +347,8 @@ else:
                 ):
                     st.session_state["calibration_last_click"] = click_signature
                     if len(calibration_points) < len(corner_order):
+                        if not calibration_points:
+                            st.session_state["calibration_frame_index"] = frame_index
                         calibration_points.append(
                             (
                                 float(click["x"]) / scale,
@@ -511,6 +522,97 @@ else:
                                     description += " — off court"
                                 point_descriptions.append(description)
                             st.caption("\n\n".join(point_descriptions))
+
+                    if st.session_state.get("calibration_homography") is not None:
+                        st.subheader("Player detection test")
+                        if st.button(
+                            "Detect players on this frame",
+                            key="detect_players_on_frame",
+                        ):
+                            st.session_state.pop("player_detection_result", None)
+                            try:
+                                with st.spinner("Running YOLO..."):
+                                    detections = (
+                                        _cached_player_detector().detect_players(
+                                            frame_bgr
+                                        )
+                                    )
+                                court_detections = filter_on_court(
+                                    detections,
+                                    st.session_state["calibration_homography"],
+                                )
+                                detection_frame = frame_bgr.copy()
+                                detected_court_points = []
+                                for detection in court_detections:
+                                    x1, y1, x2, y2 = (
+                                        round(value)
+                                        for value in detection["bbox"]
+                                    )
+                                    foot_x, foot_y = (
+                                        round(value)
+                                        for value in detection["foot_point"]
+                                    )
+                                    cv2.rectangle(
+                                        detection_frame,
+                                        (x1, y1),
+                                        (x2, y2),
+                                        (0, 255, 0),
+                                        2,
+                                    )
+                                    cv2.circle(
+                                        detection_frame,
+                                        (foot_x, foot_y),
+                                        5,
+                                        (0, 0, 255),
+                                        -1,
+                                    )
+                                    cv2.putText(
+                                        detection_frame,
+                                        f"{detection['confidence']:.2f}",
+                                        (x1, max(0, y1 - 8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.6,
+                                        (0, 255, 0),
+                                        2,
+                                    )
+                                    detected_court_points.append(detection["court_point"])
+                                st.session_state["player_detection_result"] = {
+                                    "detection_frame": detection_frame,
+                                    "court_points": detected_court_points,
+                                    "total_count": len(detections),
+                                    "kept_count": len(court_detections),
+                                    "frame_index": frame_index,
+                                }
+                            except Exception as error:
+                                st.error(f"Player detection failed: {error}")
+
+                        detection_result = st.session_state.get(
+                            "player_detection_result"
+                        )
+                        if (
+                            detection_result is not None
+                            and detection_result["frame_index"] == frame_index
+                        ):
+                            st.caption(
+                                f"YOLO found {detection_result['total_count']} people; "
+                                f"{detection_result['kept_count']} kept on court."
+                            )
+                            detection_column, detection_court_column = st.columns(2)
+                            with detection_column:
+                                st.image(
+                                    cv2.cvtColor(
+                                        detection_result["detection_frame"],
+                                        cv2.COLOR_BGR2RGB,
+                                    ),
+                                    use_container_width=True,
+                                )
+                            with detection_court_column:
+                                st.image(
+                                    draw_top_down_court(
+                                        detection_result["court_points"]
+                                    ),
+                                    use_container_width=True,
+                                )
 
         uploaded_clip.seek(0)
         st.video(uploaded_clip)
