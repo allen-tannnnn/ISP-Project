@@ -18,6 +18,20 @@ class CourtPlayerDetection(PlayerDetection):
     court_point: tuple[float, float]
 
 
+class RejectedCourtPlayerDetection(CourtPlayerDetection):
+    reason: str
+
+
+def _validate_margin(name: str, margin: float) -> float:
+    try:
+        value = float(margin)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be a finite nonnegative number.") from error
+    if isinstance(margin, bool) or not np.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite nonnegative number.")
+    return value
+
+
 class PlayerDetector:
     """Detect people in video frames with an Ultralytics YOLO model."""
 
@@ -77,24 +91,50 @@ class PlayerDetector:
 def filter_on_court(
     detections: Sequence[PlayerDetection],
     H: np.ndarray,
-    margin_ft: float = 6,
+    margin_ft: float | None = None,
+    margin_x_ft: float = 4,
+    margin_y_ft: float = 25,
 ) -> list[CourtPlayerDetection]:
-    """Map player foot points to court feet and discard positions off-court."""
-    if not np.isfinite(margin_ft) or margin_ft < 0:
-        raise ValueError("margin_ft must be a finite nonnegative number.")
+    """Map player foot points to court feet and discard positions off-court.
+
+    The legacy ``margin_ft`` argument overrides both axis-specific margins.
+    """
+    if margin_ft is not None:
+        margin_ft = _validate_margin("margin_ft", margin_ft)
+        margin_x_ft = margin_y_ft = margin_ft
+    kept, _ = classify_detections(detections, H, margin_x_ft, margin_y_ft)
+    return kept
+
+
+def classify_detections(
+    detections: Sequence[PlayerDetection],
+    H: np.ndarray,
+    margin_x_ft: float = 4,
+    margin_y_ft: float = 25,
+) -> tuple[list[CourtPlayerDetection], list[RejectedCourtPlayerDetection]]:
+    """Map detections to court feet and classify them against court margins."""
+    margin_x_ft = _validate_margin("margin_x_ft", margin_x_ft)
+    margin_y_ft = _validate_margin("margin_y_ft", margin_y_ft)
 
     kept: list[CourtPlayerDetection] = []
+    rejected: list[RejectedCourtPlayerDetection] = []
     for detection in detections:
-        court_point = pixel_to_court(H, detection["foot_point"])
+        try:
+            court_point = pixel_to_court(H, detection["foot_point"])
+        except ValueError:
+            continue
         court_x, court_y = float(court_point[0]), float(court_point[1])
-        if (
-            -margin_ft <= court_x <= 36.0 + margin_ft
-            and -margin_ft <= court_y <= 78.0 + margin_ft
-        ):
-            kept.append(
-                {
-                    **detection,
-                    "court_point": (court_x, court_y),
-                }
-            )
-    return kept
+        mapped_detection: CourtPlayerDetection = {
+            **detection,
+            "court_point": (court_x, court_y),
+        }
+        reason = None
+        if court_x < -margin_x_ft or court_x > 36.0 + margin_x_ft:
+            reason = "outside sideline margin"
+        elif court_y < -margin_y_ft or court_y > 78.0 + margin_y_ft:
+            reason = "behind baseline margin"
+        if reason is not None:
+            rejected.append({**mapped_detection, "reason": reason})
+        else:
+            kept.append(mapped_detection)
+    return kept, rejected

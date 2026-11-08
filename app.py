@@ -25,7 +25,7 @@ from courtvision.calibration import (
     pixel_to_court,
     reprojection_error,
 )
-from courtvision.detection import PlayerDetector, filter_on_court
+from courtvision.detection import PlayerDetector, classify_detections
 from courtvision.video_io import (
     VideoReadError,
     get_frame,
@@ -537,7 +537,10 @@ else:
                                             frame_bgr
                                         )
                                     )
-                                court_detections = filter_on_court(
+                                (
+                                    court_detections,
+                                    rejected_detections,
+                                ) = classify_detections(
                                     detections,
                                     st.session_state["calibration_homography"],
                                 )
@@ -575,12 +578,38 @@ else:
                                         (0, 255, 0),
                                         2,
                                     )
-                                    detected_court_points.append(detection["court_point"])
+                                    detected_court_points.append(
+                                        detection["court_point"]
+                                    )
+                                for detection in rejected_detections:
+                                    x1, y1, x2, y2 = (
+                                        round(value)
+                                        for value in detection["bbox"]
+                                    )
+                                    court_x, court_y = detection["court_point"]
+                                    cv2.rectangle(
+                                        detection_frame,
+                                        (x1, y1),
+                                        (x2, y2),
+                                        (0, 0, 255),
+                                        2,
+                                    )
+                                    cv2.putText(
+                                        detection_frame,
+                                        f"({court_x:.1f}, {court_y:.1f}) "
+                                        f"{detection['reason']}",
+                                        (x1, max(0, y1 - 8)),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.5,
+                                        (0, 0, 255),
+                                        2,
+                                    )
                                 st.session_state["player_detection_result"] = {
                                     "detection_frame": detection_frame,
                                     "court_points": detected_court_points,
                                     "total_count": len(detections),
                                     "kept_count": len(court_detections),
+                                    "rejected_count": len(rejected_detections),
                                     "frame_index": frame_index,
                                 }
                             except Exception as error:
@@ -595,7 +624,8 @@ else:
                         ):
                             st.caption(
                                 f"YOLO found {detection_result['total_count']} people; "
-                                f"{detection_result['kept_count']} kept on court."
+                                f"{detection_result['kept_count']} kept on court; "
+                                f"{detection_result['rejected_count']} rejected."
                             )
                             detection_column, detection_court_column = st.columns(2)
                             with detection_column:

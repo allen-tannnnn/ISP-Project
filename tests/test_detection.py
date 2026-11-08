@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from courtvision.detection import PlayerDetection, filter_on_court
+from courtvision.detection import (
+    PlayerDetection,
+    classify_detections,
+    filter_on_court,
+)
 
 
 HOMOGRAPHY = np.array(
@@ -45,3 +49,37 @@ def test_filter_on_court_rejects_negative_or_nonfinite_margin():
 
     with pytest.raises(ValueError, match="margin_ft"):
         filter_on_court([], HOMOGRAPHY, margin_ft=float("nan"))
+
+
+def test_classify_detections_keeps_detection_15_feet_behind_far_baseline():
+    detection = _detection_at_pixel(280.0, 1130.0)  # (18, 93) feet
+
+    kept, rejected = classify_detections([detection], HOMOGRAPHY)
+
+    assert len(kept) == 1
+    assert kept[0]["court_point"] == pytest.approx((18.0, 93.0))
+    assert not rejected
+
+
+def test_classify_detections_rejects_detection_beyond_baseline_margin():
+    detection = _detection_at_pixel(280.0, 1130.0)  # (18, 93) feet
+
+    kept, rejected = classify_detections(
+        [detection],
+        HOMOGRAPHY,
+        margin_y_ft=6,
+    )
+
+    assert not kept
+    assert rejected[0]["court_point"] == pytest.approx((18.0, 93.0))
+    assert rejected[0]["reason"] == "behind baseline margin"
+
+
+def test_classify_detections_rejects_detection_eight_feet_outside_sideline():
+    detection = _detection_at_pixel(540.0, 590.0)  # (44, 39) feet
+
+    kept, rejected = classify_detections([detection], HOMOGRAPHY)
+
+    assert not kept
+    assert rejected[0]["court_point"] == pytest.approx((44.0, 39.0))
+    assert rejected[0]["reason"] == "outside sideline margin"
