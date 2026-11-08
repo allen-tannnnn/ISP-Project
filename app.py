@@ -17,7 +17,9 @@ from courtvision.calibration import (
     REFERENCE_POINT_PRESETS,
     compute_homography,
     draw_court_overlay,
+    draw_top_down_court,
     get_reference_points,
+    pixel_to_court,
     reprojection_error,
 )
 from courtvision.video_io import (
@@ -159,6 +161,7 @@ else:
                 st.session_state["calibration_points"] = []
                 st.session_state.pop("calibration_homography", None)
                 st.session_state.pop("calibration_error", None)
+                st.session_state["click_test_points"] = []
 
             calibration_points = st.session_state.setdefault(
                 "calibration_points", []
@@ -168,6 +171,7 @@ else:
                 calibration_points.clear()
                 st.session_state.pop("calibration_homography", None)
                 st.session_state.pop("calibration_error", None)
+                st.session_state["click_test_points"] = []
 
             corner_order = ("near-left", "near-right", "far-right", "far-left")
             if len(calibration_points) < len(corner_order):
@@ -303,6 +307,89 @@ else:
                             "Likely causes: wrong click order, imprecise clicks "
                             "(zoom in), or camera lens distortion."
                         )
+
+                    st.subheader(
+                        "Click test: where does a point land on the court?"
+                    )
+                    test_points = st.session_state.setdefault(
+                        "click_test_points", []
+                    )
+                    if st.button("Clear test points", key="clear_test_points"):
+                        test_points.clear()
+
+                    test_frame_column, court_column = st.columns(2)
+                    test_height, test_width = frame_bgr.shape[:2]
+                    test_display_width = min(test_width, 800)
+                    test_scale = test_display_width / test_width
+                    test_display_height = max(1, round(test_height * test_scale))
+                    if test_display_width == test_width:
+                        test_display_frame = frame_bgr.copy()
+                    else:
+                        test_display_frame = cv2.resize(
+                            frame_bgr,
+                            (test_display_width, test_display_height),
+                            interpolation=cv2.INTER_AREA,
+                        )
+
+                    with test_frame_column:
+                        test_click = streamlit_image_coordinates(
+                            cv2.cvtColor(test_display_frame, cv2.COLOR_BGR2RGB),
+                            width=test_display_width,
+                            height=test_display_height,
+                            key="click_test_image",
+                            cursor="crosshair",
+                        )
+                    if isinstance(test_click, dict) and all(
+                        key in test_click for key in ("x", "y", "unix_time")
+                    ):
+                        test_signature = (
+                            test_click["unix_time"],
+                            test_click["x"],
+                            test_click["y"],
+                        )
+                        if test_signature != st.session_state.get(
+                            "click_test_last_click"
+                        ):
+                            st.session_state["click_test_last_click"] = test_signature
+                            original_pixel = (
+                                float(test_click["x"]) / test_scale,
+                                float(test_click["y"]) / test_scale,
+                            )
+                            try:
+                                court_point = pixel_to_court(
+                                    st.session_state["calibration_homography"],
+                                    original_pixel,
+                                )
+                            except ValueError as error:
+                                st.error(str(error))
+                            else:
+                                test_points.append(
+                                    (float(court_point[0]), float(court_point[1]))
+                                )
+                                del test_points[:-5]
+
+                    with court_column:
+                        st.image(
+                            draw_top_down_court(test_points),
+                            use_container_width=True,
+                        )
+                        if test_points:
+                            point_descriptions = []
+                            for point_number, (court_x, court_y) in enumerate(
+                                test_points,
+                                start=1,
+                            ):
+                                description = (
+                                    f"Point {point_number}: "
+                                    f"({court_x:.1f}, {court_y:.1f}) ft"
+                                )
+                                if not (
+                                    0.0 <= court_x <= 36.0
+                                    and 0.0 <= court_y <= 78.0
+                                ):
+                                    description += " — off court"
+                                point_descriptions.append(description)
+                            st.caption("\n\n".join(point_descriptions))
 
         uploaded_clip.seek(0)
         st.video(uploaded_clip)

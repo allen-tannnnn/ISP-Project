@@ -5,7 +5,9 @@ import pytest
 from courtvision.calibration import (
     compute_homography,
     court_to_pixel,
+    court_to_diagram,
     draw_court_overlay,
+    draw_top_down_court,
     get_reference_points,
     pixel_to_court,
     reprojection_error,
@@ -126,3 +128,53 @@ def test_draw_court_overlay_preserves_input_and_draws_on_copy():
     assert overlay.shape == frame.shape
     np.testing.assert_array_equal(frame, original)
     assert np.any(overlay != frame)
+
+
+def test_top_down_court_has_expected_rgb_image_shape_and_dtype():
+    diagram = draw_top_down_court(size_px=(480, 900))
+    empty_points_diagram = draw_top_down_court([], size_px=(480, 900))
+
+    assert diagram.shape == (900, 480, 3)
+    assert diagram.dtype == np.uint8
+    np.testing.assert_array_equal(empty_points_diagram, diagram)
+
+
+def test_court_to_diagram_maps_court_corners_with_expected_orientation():
+    bottom_left, top_right = court_to_diagram(
+        [(0.0, 0.0), (36.0, 78.0)],
+        size_px=(480, 900),
+    )
+
+    assert bottom_left[0] < top_right[0]
+    assert bottom_left[1] > top_right[1]
+    assert (top_right[0] - bottom_left[0]) / (
+        bottom_left[1] - top_right[1]
+    ) == pytest.approx(36 / 78)
+
+
+def test_top_down_points_only_change_pixels_near_their_dots():
+    plain_diagram = draw_top_down_court(size_px=(480, 900))
+    point = (18.0, 39.0)
+    marked_diagram = draw_top_down_court([point], size_px=(480, 900))
+    pixel_x, pixel_y = court_to_diagram(point, size_px=(480, 900))
+    rows, columns = np.ogrid[:900, :480]
+    outside_dot = (
+        (columns - round(pixel_x)) ** 2 + (rows - round(pixel_y)) ** 2 > 9**2
+    )
+
+    np.testing.assert_array_equal(
+        marked_diagram[outside_dot],
+        plain_diagram[outside_dot],
+    )
+    assert np.any(marked_diagram != plain_diagram)
+
+
+def test_top_down_court_skips_points_outside_court_and_margin():
+    plain_diagram = draw_top_down_court(size_px=(480, 900))
+
+    diagram = draw_top_down_court(
+        [(-7.0, 39.0), (43.0, 39.0), (18.0, 85.0)],
+        size_px=(480, 900),
+    )
+
+    np.testing.assert_array_equal(diagram, plain_diagram)

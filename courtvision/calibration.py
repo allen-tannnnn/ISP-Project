@@ -308,3 +308,143 @@ def draw_court_overlay(
             )
 
     return overlay
+
+
+def _diagram_dimensions(size_px: int | tuple[int, int]) -> tuple[int, int]:
+    """Return diagram width and height after validating the requested size."""
+    if isinstance(size_px, int):
+        dimensions = (size_px, size_px)
+    else:
+        dimensions = size_px
+    if (
+        len(dimensions) != 2
+        or any(not isinstance(value, int) or value <= 0 for value in dimensions)
+    ):
+        raise ValueError("size_px must be a positive integer or a (width, height) pair.")
+    return dimensions
+
+
+def _diagram_layout(
+    size_px: int | tuple[int, int],
+    margin_ft: float,
+) -> tuple[int, int, float, float, float]:
+    """Return canvas dimensions, court origin, and pixels-per-foot scale."""
+    width, height = _diagram_dimensions(size_px)
+    if not np.isfinite(margin_ft) or margin_ft < 0:
+        raise ValueError("margin_ft must be a finite nonnegative number.")
+
+    scale = min(
+        width / (36.0 + 2.0 * margin_ft),
+        height / (78.0 + 2.0 * margin_ft),
+    )
+    left = (width - (36.0 + 2.0 * margin_ft) * scale) / 2.0 + margin_ft * scale
+    top = (height - (78.0 + 2.0 * margin_ft) * scale) / 2.0 + margin_ft * scale
+    return width, height, left, top, scale
+
+
+def court_to_diagram(
+    points: Sequence[float] | Sequence[Sequence[float]] | np.ndarray,
+    size_px: int | tuple[int, int] = (480, 900),
+    margin_ft: float = 6,
+) -> np.ndarray:
+    """Convert court feet to diagram pixels, preserving the input point shape.
+
+    ``size_px`` is the output ``(width, height)`` in pixels (or one size for a
+    square image). The returned points use top-left-origin image coordinates,
+    with the near baseline at the bottom of the diagram.
+    """
+    point_array, original_shape = _normalize_diagram_points(points)
+    width, height, left, top, scale = _diagram_layout(size_px, margin_ft)
+    del width, height
+    diagram_points = np.empty_like(point_array)
+    diagram_points[:, 0] = left + point_array[:, 0] * scale
+    diagram_points[:, 1] = top + (78.0 - point_array[:, 1]) * scale
+    return diagram_points.reshape(original_shape)
+
+
+def _normalize_diagram_points(
+    points: Sequence[float] | Sequence[Sequence[float]] | np.ndarray,
+) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Normalize one court point or an array of court points, including empty arrays."""
+    try:
+        point_array = np.asarray(points, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Points must be (x, y) coordinates.") from error
+    if point_array.ndim == 1 and point_array.size == 0:
+        return np.empty((0, 2), dtype=np.float64), point_array.shape
+    if point_array.ndim == 1 and point_array.shape == (2,):
+        return point_array.reshape(1, 2), point_array.shape
+    if point_array.ndim == 2 and point_array.shape[1] == 2:
+        return point_array, point_array.shape
+    raise ValueError("Points must be one (x, y) pair or an array of such pairs.")
+
+
+def draw_top_down_court(
+    points: Sequence[Sequence[float]] | np.ndarray | None = None,
+    size_px: int | tuple[int, int] = (480, 900),
+    margin_ft: float = 6,
+) -> np.ndarray:
+    """Render a top-down tennis court and optional court-coordinate points.
+
+    The returned image is RGB, with y=0 at the bottom and x=0 on the left.
+    The court keeps its 36:78 feet aspect ratio; ``margin_ft`` adds an equal
+    border around the court in feet. Points beyond the court plus margin are
+    ignored.
+    """
+    width, height, left, top, scale = _diagram_layout(size_px, margin_ft)
+    image = np.full((height, width, 3), (18, 24, 30), dtype=np.uint8)
+
+    court_left = round(left)
+    court_right = round(left + 36.0 * scale)
+    court_top = round(top)
+    court_bottom = round(top + 78.0 * scale)
+    cv2.rectangle(
+        image,
+        (court_left, court_top),
+        (court_right, court_bottom),
+        (38, 76, 65),
+        thickness=cv2.FILLED,
+    )
+
+    outer_lines = {
+        "near_baseline",
+        "far_baseline",
+        "left_doubles_sideline",
+        "right_doubles_sideline",
+    }
+    for name, endpoints in COURT_LINES.items():
+        diagram_endpoints = court_to_diagram(
+            endpoints,
+            size_px=size_px,
+            margin_ft=margin_ft,
+        )
+        first = tuple(int(round(value)) for value in diagram_endpoints[0])
+        second = tuple(int(round(value)) for value in diagram_endpoints[1])
+        cv2.line(
+            image,
+            first,
+            second,
+            (235, 239, 235),
+            2 if name in outer_lines else 1,
+            cv2.LINE_AA,
+        )
+
+    if points is not None:
+        point_array, _ = _normalize_diagram_points(points)
+        diagram_points = court_to_diagram(
+            point_array,
+            size_px=size_px,
+            margin_ft=margin_ft,
+        )
+        for court_point, diagram_point in zip(point_array, diagram_points):
+            x, y = court_point
+            if not np.isfinite(court_point).all() or not (
+                -margin_ft <= x <= 36.0 + margin_ft
+                and -margin_ft <= y <= 78.0 + margin_ft
+            ):
+                continue
+            center = tuple(int(round(value)) for value in diagram_point)
+            cv2.circle(image, center, 8, (12, 19, 21), thickness=cv2.FILLED)
+            cv2.circle(image, center, 5, (255, 220, 20), thickness=cv2.FILLED)
+
+    return image
