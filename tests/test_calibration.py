@@ -1,11 +1,16 @@
+import copy
+import json
+
 import cv2
 import numpy as np
 import pytest
 
 from courtvision.calibration import (
+    calibration_from_dict,
+    calibration_to_dict,
     compute_homography,
-    court_to_pixel,
     court_to_diagram,
+    court_to_pixel,
     draw_court_overlay,
     draw_top_down_court,
     get_reference_points,
@@ -178,3 +183,51 @@ def test_top_down_court_skips_points_outside_court_and_margin():
     )
 
     np.testing.assert_array_equal(diagram, plain_diagram)
+
+
+def _saved_calibration():
+    homography = compute_homography(PIXEL_POINTS, COURT_POINTS)
+    return calibration_to_dict(
+        PIXEL_POINTS,
+        COURT_POINTS,
+        homography,
+        "singles_corners",
+        (1280, 720),
+        video_name="match.mp4",
+    )
+
+
+def test_calibration_dict_round_trips_through_json():
+    saved_data = _saved_calibration()
+
+    loaded_data = calibration_from_dict(json.loads(json.dumps(saved_data)))
+
+    np.testing.assert_allclose(loaded_data["pixel_points"], PIXEL_POINTS)
+    np.testing.assert_allclose(loaded_data["court_points"], COURT_POINTS)
+    np.testing.assert_allclose(loaded_data["H"], saved_data["homography"])
+    assert loaded_data["preset"] == "singles_corners"
+    assert loaded_data["frame_width"] == 1280
+    assert loaded_data["frame_height"] == 720
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    ("missing-key", "wrong-version", "mismatched-counts", "nan", "bad-matrix", "inconsistent"),
+)
+def test_calibration_from_dict_rejects_invalid_data(invalid_case):
+    saved_data = copy.deepcopy(_saved_calibration())
+    if invalid_case == "missing-key":
+        del saved_data["pixel_points"]
+    elif invalid_case == "wrong-version":
+        saved_data["version"] = 2
+    elif invalid_case == "mismatched-counts":
+        saved_data["court_points"].pop()
+    elif invalid_case == "nan":
+        saved_data["pixel_points"][0][0] = float("nan")
+    elif invalid_case == "bad-matrix":
+        saved_data["homography"] = [[1.0, 0.0], [0.0, 1.0]]
+    else:
+        saved_data["homography"][0][0] += 1.0
+
+    with pytest.raises(ValueError):
+        calibration_from_dict(saved_data)

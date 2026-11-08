@@ -11,13 +11,27 @@ width.
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 from itertools import combinations
+from typing import TypedDict
 
 import cv2
 import numpy as np
 
 Point = tuple[float, float]
 LineSegment = tuple[Point, Point]
+
+
+class CalibrationData(TypedDict):
+    """Validated calibration fields returned when loading a saved record."""
+
+    pixel_points: list[list[float]]
+    court_points: list[list[float]]
+    H: np.ndarray
+    preset: str
+    frame_width: int
+    frame_height: int
+
 
 COURT_LINES: dict[str, LineSegment] = {
     # The doubles outline is formed by the four sidelines and baselines.
@@ -66,6 +80,173 @@ def get_reference_points(
         KeyError: If no reference-point preset has that name.
     """
     return REFERENCE_POINT_PRESETS[preset_name]
+
+
+def calibration_to_dict(
+    pixel_points: Sequence[Sequence[float]] | np.ndarray,
+    court_points: Sequence[Sequence[float]] | np.ndarray,
+    H: np.ndarray,
+    preset_name: str,
+    frame_size: tuple[int, int],
+    video_name: str | None = None,
+) -> dict[str, object]:
+    """Create a JSON-ready calibration record with plain Python values.
+
+    ``frame_size`` is ``(width, height)``. The record includes an ISO 8601
+    timestamp and the supplied point correspondences and homography.
+    """
+    try:
+        width, height = frame_size
+        pixels = np.asarray(pixel_points, dtype=np.float64)
+        court = np.asarray(court_points, dtype=np.float64)
+        matrix = np.asarray(H, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("Calibration data and frame_size have invalid shapes or values.") from error
+
+    if pixels.ndim != 2 or pixels.shape[1:] != (2,):
+        raise ValueError("pixel_points must be an array of (x, y) pairs.")
+    if court.ndim != 2 or court.shape[1:] != (2,):
+        raise ValueError("court_points must be an array of (x, y) pairs.")
+    if pixels.shape[0] != court.shape[0] or pixels.shape[0] < 4:
+        raise ValueError(
+            "pixel_points and court_points must have at least four matching points."
+        )
+    if not np.isfinite(pixels).all() or not np.isfinite(court).all():
+        raise ValueError("Calibration points must contain only finite numbers.")
+    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+        raise ValueError("H must be a finite 3-by-3 matrix.")
+    if (
+        isinstance(width, bool)
+        or isinstance(height, bool)
+        or not isinstance(width, (int, np.integer))
+        or not isinstance(height, (int, np.integer))
+        or width <= 0
+        or height <= 0
+    ):
+        raise ValueError("frame_size must contain positive integer width and height.")
+
+    return {
+        "version": 1,
+        "preset": str(preset_name),
+        "pixel_points": [[float(value) for value in point] for point in pixels],
+        "court_points": [[float(value) for value in point] for point in court],
+        "homography": [
+            [float(value) for value in row] for row in matrix
+        ],
+        "frame_width": int(width),
+        "frame_height": int(height),
+        "video_name": video_name,
+        "created": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def calibration_from_dict(data: object) -> CalibrationData:
+    """Validate a saved calibration and return its points, matrix, preset, and size.
+
+    Raises:
+        ValueError: If the record is missing fields, malformed, unsupported,
+            geometrically invalid, or inconsistent with its stored homography.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Calibration data must be a JSON object.")
+
+    required_keys = {
+        "version",
+        "preset",
+        "pixel_points",
+        "court_points",
+        "homography",
+        "frame_width",
+        "frame_height",
+    }
+    missing_keys = required_keys.difference(data)
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise ValueError(f"Calibration file is missing required key(s): {missing}.")
+    if (
+        isinstance(data["version"], bool)
+        or not isinstance(data["version"], int)
+        or data["version"] != 1
+    ):
+        raise ValueError("Unsupported calibration version; expected version 1.")
+    if not isinstance(data["preset"], str):
+        raise ValueError("Calibration preset must be a string.")
+
+    pixel_points = _validate_saved_points(data["pixel_points"], "pixel_points")
+    court_points = _validate_saved_points(data["court_points"], "court_points")
+    if len(pixel_points) != len(court_points):
+        raise ValueError("pixel_points and court_points must have matching point counts.")
+    if len(pixel_points) < 4:
+        raise ValueError("Calibration must contain at least four corresponding points.")
+
+    stored_homography = _validate_saved_homography(data["homography"])
+    frame_width = _validate_frame_dimension(data["frame_width"], "frame_width")
+    frame_height = _validate_frame_dimension(data["frame_height"], "frame_height")
+
+    try:
+        computed_homography = compute_homography(
+            pixel_points[:4],
+            court_points[:4],
+        )
+    except ValueError as error:
+        raise ValueError(f"Calibration points are invalid: {error}") from error
+    if not np.allclose(
+        computed_homography,
+        stored_homography,
+        rtol=1e-6,
+        atol=1e-6,
+    ):
+        raise ValueError(
+            "Calibration file is inconsistent: its homography does not match "
+            "the stored points."
+        )
+
+    return {
+        "pixel_points": pixel_points,
+        "court_points": court_points,
+        "H": stored_homography,
+        "preset": data["preset"],
+        "frame_width": frame_width,
+        "frame_height": frame_height,
+    }
+
+
+def _validate_saved_points(value: object, name: str) -> list[list[float]]:
+    """Validate saved JSON point arrays and normalize their values to floats."""
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list of [x, y] pairs.")
+    points: list[list[float]] = []
+    for index, point in enumerate(value):
+        if not isinstance(point, list) or len(point) != 2:
+            raise ValueError(f"{name}[{index}] must be a [x, y] pair.")
+        if any(isinstance(coordinate, bool) for coordinate in point):
+            raise ValueError(f"{name}[{index}] must contain finite numbers.")
+        try:
+            normalized = [float(coordinate) for coordinate in point]
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"{name}[{index}] must contain finite numbers.") from error
+        if not np.isfinite(normalized).all():
+            raise ValueError(f"{name}[{index}] must contain finite numbers.")
+        points.append(normalized)
+    return points
+
+
+def _validate_saved_homography(value: object) -> np.ndarray:
+    """Validate a saved JSON homography matrix."""
+    try:
+        matrix = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("homography must be a finite 3-by-3 matrix.") from error
+    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+        raise ValueError("homography must be a finite 3-by-3 matrix.")
+    return matrix
+
+
+def _validate_frame_dimension(value: object, name: str) -> int:
+    """Validate a positive integer frame dimension."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
 
 
 def _validate_four_points(

@@ -5,6 +5,7 @@ and orchestrate calibration, detection, tracking, bounce, speed, line
 calling, and heatmap modules into a single interactive workflow.
 """
 
+import json
 from pathlib import Path
 
 import cv2
@@ -15,6 +16,8 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 from courtvision.calibration import (
     DEFAULT_REFERENCE_PRESET,
     REFERENCE_POINT_PRESETS,
+    calibration_from_dict,
+    calibration_to_dict,
     compute_homography,
     draw_court_overlay,
     draw_top_down_court,
@@ -147,6 +150,89 @@ else:
             )
 
             st.subheader("Calibration")
+            st.caption(
+                "A saved calibration is only valid if the camera has not moved "
+                "and the video resolution is the same."
+            )
+            calibration_upload = st.file_uploader(
+                "Load saved calibration (JSON)",
+                type=["json"],
+                key="calibration_upload",
+            )
+            if calibration_upload is None:
+                st.session_state.pop("calibration_load_signature", None)
+                st.session_state.pop("calibration_load_feedback", None)
+            else:
+                load_signature = (
+                    calibration_upload.name,
+                    calibration_upload.size,
+                )
+                if load_signature != st.session_state.get(
+                    "calibration_load_signature"
+                ):
+                    st.session_state["calibration_load_signature"] = load_signature
+                    try:
+                        saved_data = calibration_from_dict(
+                            json.loads(calibration_upload.getvalue())
+                        )
+                    except json.JSONDecodeError as error:
+                        st.session_state["calibration_load_feedback"] = (
+                            "error",
+                            f"Could not parse calibration JSON: {error}",
+                        )
+                    except ValueError as error:
+                        st.session_state["calibration_load_feedback"] = (
+                            "error",
+                            str(error),
+                        )
+                    else:
+                        saved_preset = saved_data["preset"]
+                        if saved_preset not in REFERENCE_POINT_PRESETS:
+                            st.session_state["calibration_load_feedback"] = (
+                                "error",
+                                f"Unknown calibration preset: {saved_preset}.",
+                            )
+                        elif (
+                            saved_data["frame_width"] != frame_bgr.shape[1]
+                            or saved_data["frame_height"] != frame_bgr.shape[0]
+                        ):
+                            st.session_state["calibration_load_feedback"] = (
+                                "warning",
+                                "This calibration was made for a different frame "
+                                "resolution and may be wrong. It was not loaded.",
+                            )
+                        else:
+                            st.session_state["calibration_points"] = (
+                                saved_data["pixel_points"]
+                            )
+                            st.session_state["calibration_court_points"] = (
+                                saved_data["court_points"]
+                            )
+                            st.session_state["calibration_homography"] = (
+                                saved_data["H"]
+                            )
+                            st.session_state["calibration_preset"] = saved_preset
+                            st.session_state["calibration_context"] = (
+                                video_path,
+                                frame_index,
+                                saved_preset,
+                            )
+                            st.session_state["click_test_points"] = []
+                            st.session_state["calibration_load_feedback"] = (
+                                "success",
+                                f"Loaded calibration from {calibration_upload.name}.",
+                            )
+
+                feedback = st.session_state.get("calibration_load_feedback")
+                if feedback is not None:
+                    level, message = feedback
+                    if level == "success":
+                        st.success(message)
+                    elif level == "warning":
+                        st.warning(message)
+                    else:
+                        st.error(message)
+
             preset_names = list(REFERENCE_POINT_PRESETS)
             selected_preset = st.selectbox(
                 "Reference-point preset",
@@ -159,9 +245,13 @@ else:
             if st.session_state.get("calibration_context") != calibration_context:
                 st.session_state["calibration_context"] = calibration_context
                 st.session_state["calibration_points"] = []
+                st.session_state.pop("calibration_court_points", None)
                 st.session_state.pop("calibration_homography", None)
                 st.session_state.pop("calibration_error", None)
                 st.session_state["click_test_points"] = []
+                feedback = st.session_state.get("calibration_load_feedback")
+                if feedback is not None and feedback[0] == "success":
+                    st.session_state.pop("calibration_load_feedback", None)
 
             calibration_points = st.session_state.setdefault(
                 "calibration_points", []
@@ -169,9 +259,13 @@ else:
             reset_column, instruction_column = st.columns([1, 4])
             if reset_column.button("Reset calibration", key="reset_calibration"):
                 calibration_points.clear()
+                st.session_state.pop("calibration_court_points", None)
                 st.session_state.pop("calibration_homography", None)
                 st.session_state.pop("calibration_error", None)
                 st.session_state["click_test_points"] = []
+                feedback = st.session_state.get("calibration_load_feedback")
+                if feedback is not None and feedback[0] == "success":
+                    st.session_state.pop("calibration_load_feedback", None)
 
             corner_order = ("near-left", "near-right", "far-right", "far-left")
             if len(calibration_points) < len(corner_order):
@@ -243,18 +337,21 @@ else:
                         )
                         st.rerun()
 
-            if len(calibration_points) == len(corner_order):
-                court_points = get_reference_points(selected_preset)
+            if len(calibration_points) >= len(corner_order):
+                court_points = st.session_state.get("calibration_court_points")
+                if court_points is None:
+                    court_points = get_reference_points(selected_preset)
                 try:
                     homography = compute_homography(
-                        calibration_points,
-                        court_points,
+                        calibration_points[: len(corner_order)],
+                        court_points[: len(corner_order)],
                     )
                 except ValueError as error:
                     st.session_state.pop("calibration_homography", None)
                     st.session_state["calibration_error"] = str(error)
                     st.error(str(error))
                 else:
+                    st.session_state["calibration_court_points"] = court_points
                     st.session_state["calibration_homography"] = homography
                     st.session_state.pop("calibration_error", None)
                     mean_error, max_error = reprojection_error(
@@ -272,6 +369,21 @@ else:
                     max_column.metric(
                         "Maximum reprojection error",
                         f"{max_error:.2f} px",
+                    )
+                    calibration_document = calibration_to_dict(
+                        calibration_points,
+                        court_points,
+                        homography,
+                        selected_preset,
+                        (frame_bgr.shape[1], frame_bgr.shape[0]),
+                        video_name=uploaded_clip.name,
+                    )
+                    st.download_button(
+                        "Download calibration (JSON)",
+                        data=json.dumps(calibration_document, indent=2),
+                        file_name="courtvision_calibration.json",
+                        mime="application/json",
+                        key="download_calibration",
                     )
                     st.subheader("Calibration check")
                     show_line_labels = st.checkbox(
