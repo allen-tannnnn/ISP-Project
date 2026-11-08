@@ -149,12 +149,11 @@ def get_frame(path: str | Path, frame_index: int) -> np.ndarray:
     """Read one frame from a video without loading the whole clip.
 
     Raises:
-        ValueError: ``frame_index`` is negative.
-        VideoReadError: the video cannot be opened, sought, or read at the
-            requested frame.
+        VideoReadError: ``frame_index`` is negative, or the video cannot be
+            opened, sought, or read at the requested frame.
     """
     if frame_index < 0:
-        raise ValueError("frame_index must be 0 or greater.")
+        raise VideoReadError("frame_index must be 0 or greater.")
 
     capture = cv2.VideoCapture(str(path))
     try:
