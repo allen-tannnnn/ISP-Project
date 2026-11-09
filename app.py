@@ -10,9 +10,17 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pandas as pd
 import streamlit as st
 from streamlit_image_coordinates import streamlit_image_coordinates
 
+from courtvision.analysis import (
+    HEATMAP_MARGIN_X_FT,
+    HEATMAP_MARGIN_Y_FT,
+    build_heatmap,
+    clean_positions,
+    render_heatmap,
+)
 from courtvision.calibration import (
     DEFAULT_REFERENCE_PRESET,
     REFERENCE_POINT_PRESETS,
@@ -516,7 +524,11 @@ else:
 
                     with court_column:
                         st.image(
-                            draw_top_down_court(test_points),
+                            draw_top_down_court(
+                                test_points,
+                                margin_x_ft=HEATMAP_MARGIN_X_FT,
+                                margin_y_ft=HEATMAP_MARGIN_Y_FT,
+                            ),
                             use_container_width=True,
                         )
                         if test_points:
@@ -653,7 +665,9 @@ else:
                             with detection_court_column:
                                 st.image(
                                     draw_top_down_court(
-                                        detection_result["court_points"]
+                                        detection_result["court_points"],
+                                        margin_x_ft=HEATMAP_MARGIN_X_FT,
+                                        margin_y_ft=HEATMAP_MARGIN_Y_FT,
                                     ),
                                     use_container_width=True,
                                 )
@@ -722,3 +736,152 @@ else:
 
         uploaded_clip.seek(0)
         st.video(uploaded_clip)
+
+st.subheader("Heatmap")
+detections_df = st.session_state.get("detections_df")
+if detections_df is None:
+    detections_upload = st.file_uploader(
+        "Load detections CSV",
+        type=["csv"],
+        key="load_detections_csv",
+    )
+    if detections_upload is not None:
+        expected_columns = {
+            "frame_index",
+            "time_sec",
+            "side",
+            "confidence",
+            "foot_x_px",
+            "foot_y_px",
+            "court_x_ft",
+            "court_y_ft",
+        }
+        try:
+            detections_df = pd.read_csv(detections_upload)
+        except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError) as error:
+            st.error(f"Could not read detections CSV: {error}")
+            detections_df = None
+        if detections_df is not None:
+            missing_columns = expected_columns.difference(detections_df.columns)
+            if missing_columns:
+                st.error(
+                    "Detections CSV is missing expected columns: "
+                    + ", ".join(sorted(missing_columns))
+                )
+                detections_df = None
+
+if detections_df is not None:
+    side_selection = st.radio(
+        "Heatmap side",
+        ("Near", "Far", "Both"),
+        horizontal=True,
+        key="heatmap_side",
+    )
+    clean_enabled = st.checkbox(
+        "Clean outliers and fill short gaps",
+        value=True,
+        key="heatmap_clean_positions",
+    )
+    blur_ft = st.slider(
+        "Blur (ft)",
+        min_value=1,
+        max_value=6,
+        value=2,
+        key="heatmap_blur_ft",
+    )
+    side_names = {
+        "Near": ("near",),
+        "Far": ("far",),
+        "Both": ("near", "far"),
+    }[side_selection]
+
+    video_metadata = st.session_state.get("video_metadata")
+    frame_height = getattr(video_metadata, "height", None)
+    fps = getattr(video_metadata, "fps", None)
+    frame_indices = pd.to_numeric(
+        detections_df["frame_index"], errors="coerce"
+    ).dropna()
+    time_values = pd.to_numeric(
+        detections_df["time_sec"], errors="coerce"
+    ).to_numpy(dtype=np.float64)
+    index_values = pd.to_numeric(
+        detections_df["frame_index"], errors="coerce"
+    ).to_numpy(dtype=np.float64)
+    valid_time = (
+        np.isfinite(time_values)
+        & (time_values > 0)
+        & np.isfinite(index_values)
+        & (index_values > 0)
+    )
+    if fps is None and np.any(valid_time):
+        fps = float(np.median(index_values[valid_time] / time_values[valid_time]))
+    if fps is None or not np.isfinite(fps) or fps <= 0:
+        fps = 30.0
+    unique_indices = np.sort(frame_indices.unique())
+    frame_differences = np.diff(unique_indices)
+    frame_differences = frame_differences[frame_differences > 0]
+    frame_step = int(st.session_state.get("full_clip_frame_step", 1))
+    if frame_differences.size:
+        frame_step = int(np.min(frame_differences))
+
+    rows_removed_as_outliers = 0
+    rows_interpolated = 0
+    positions_for_heatmap = detections_df
+    try:
+        if clean_enabled:
+            for side_name in side_names:
+                side_rows = detections_df.loc[
+                    detections_df["side"] == side_name
+                ].sort_values("frame_index", kind="stable")
+                x_values = pd.to_numeric(side_rows["court_x_ft"], errors="coerce")
+                y_values = pd.to_numeric(side_rows["court_y_ft"], errors="coerce")
+                median_x = x_values.rolling(7, center=True, min_periods=1).median()
+                median_y = y_values.rolling(7, center=True, min_periods=1).median()
+                outliers = (
+                    ((x_values - median_x).abs() > 12.0)
+                    | ((y_values - median_y).abs() > 12.0)
+                )
+                rows_removed_as_outliers += int(outliers.sum())
+            positions_for_heatmap = clean_positions(
+                detections_df,
+                frame_step=frame_step,
+                fps=fps,
+                frame_height=frame_height,
+            )
+            rows_interpolated = int(
+                positions_for_heatmap.loc[
+                    positions_for_heatmap["side"].isin(side_names),
+                    "interpolated",
+                ].sum()
+            )
+        heatmap_data = build_heatmap(
+            positions_for_heatmap,
+            sides=side_names,
+            blur_ft=blur_ft,
+        )
+        heatmap_image = render_heatmap(
+            heatmap_data,
+            margin_x_ft=HEATMAP_MARGIN_X_FT,
+            margin_y_ft=HEATMAP_MARGIN_Y_FT,
+        )
+    except (TypeError, ValueError) as error:
+        st.error(f"Could not generate heatmap: {error}")
+    else:
+        selected_positions = positions_for_heatmap.loc[
+            positions_for_heatmap["side"].isin(side_names)
+        ]
+        finite_positions = np.isfinite(
+            pd.to_numeric(selected_positions["court_x_ft"], errors="coerce")
+        ) & np.isfinite(
+            pd.to_numeric(selected_positions["court_y_ft"], errors="coerce")
+        )
+        rows_used = int(finite_positions.sum())
+        heatmap_column, metrics_column = st.columns([3, 1])
+        heatmap_column.image(heatmap_image, use_container_width=True)
+        metrics_column.metric("Rows used", f"{rows_used:,}")
+        metrics_column.metric(
+            "Rows removed as outliers",
+            f"{rows_removed_as_outliers:,}",
+        )
+        metrics_column.metric("Rows interpolated", f"{rows_interpolated:,}")
+        st.caption("Far-side positions are less precise than near-side ones.")

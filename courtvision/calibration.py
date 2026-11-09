@@ -507,26 +507,42 @@ def _diagram_dimensions(size_px: int | tuple[int, int]) -> tuple[int, int]:
 
 def _diagram_layout(
     size_px: int | tuple[int, int],
-    margin_ft: float,
+    margin_ft: float | None = None,
+    margin_x_ft: float = 6,
+    margin_y_ft: float = 20,
 ) -> tuple[int, int, float, float, float]:
     """Return canvas dimensions, court origin, and pixels-per-foot scale."""
     width, height = _diagram_dimensions(size_px)
-    if not np.isfinite(margin_ft) or margin_ft < 0:
-        raise ValueError("margin_ft must be a finite nonnegative number.")
+    if margin_ft is not None:
+        margin_x_ft = margin_y_ft = margin_ft
+    for name, margin in (
+        ("margin_x_ft", margin_x_ft),
+        ("margin_y_ft", margin_y_ft),
+    ):
+        if not np.isfinite(margin) or margin < 0:
+            raise ValueError(f"{name} must be a finite nonnegative number.")
 
     scale = min(
-        width / (36.0 + 2.0 * margin_ft),
-        height / (78.0 + 2.0 * margin_ft),
+        width / (36.0 + 2.0 * margin_x_ft),
+        height / (78.0 + 2.0 * margin_y_ft),
     )
-    left = (width - (36.0 + 2.0 * margin_ft) * scale) / 2.0 + margin_ft * scale
-    top = (height - (78.0 + 2.0 * margin_ft) * scale) / 2.0 + margin_ft * scale
+    left = (
+        (width - (36.0 + 2.0 * margin_x_ft) * scale) / 2.0
+        + margin_x_ft * scale
+    )
+    top = (
+        (height - (78.0 + 2.0 * margin_y_ft) * scale) / 2.0
+        + margin_y_ft * scale
+    )
     return width, height, left, top, scale
 
 
 def court_to_diagram(
     points: Sequence[float] | Sequence[Sequence[float]] | np.ndarray,
-    size_px: int | tuple[int, int] = (480, 900),
-    margin_ft: float = 6,
+    size_px: int | tuple[int, int] = (480, 1000),
+    margin_ft: float | None = None,
+    margin_x_ft: float = 6,
+    margin_y_ft: float = 20,
 ) -> np.ndarray:
     """Convert court feet to diagram pixels, preserving the input point shape.
 
@@ -535,7 +551,12 @@ def court_to_diagram(
     with the near baseline at the bottom of the diagram.
     """
     point_array, original_shape = _normalize_diagram_points(points)
-    width, height, left, top, scale = _diagram_layout(size_px, margin_ft)
+    width, height, left, top, scale = _diagram_layout(
+        size_px,
+        margin_ft,
+        margin_x_ft,
+        margin_y_ft,
+    )
     del width, height
     diagram_points = np.empty_like(point_array)
     diagram_points[:, 0] = left + point_array[:, 0] * scale
@@ -562,17 +583,24 @@ def _normalize_diagram_points(
 
 def draw_top_down_court(
     points: Sequence[Sequence[float]] | np.ndarray | None = None,
-    size_px: int | tuple[int, int] = (480, 900),
-    margin_ft: float = 6,
+    size_px: int | tuple[int, int] = (480, 1000),
+    margin_ft: float | None = None,
+    margin_x_ft: float = 6,
+    margin_y_ft: float = 20,
 ) -> np.ndarray:
     """Render a top-down tennis court and optional court-coordinate points.
 
     The returned image is RGB, with y=0 at the bottom and x=0 on the left.
-    The court keeps its 36:78 feet aspect ratio; ``margin_ft`` adds an equal
-    border around the court in feet. Points beyond the court plus margin are
-    ignored.
+    The court keeps its 36:78 feet aspect ratio. ``margin_x_ft`` and
+    ``margin_y_ft`` set the side and baseline margins respectively; the
+    legacy ``margin_ft`` argument overrides both.
     """
-    width, height, left, top, scale = _diagram_layout(size_px, margin_ft)
+    width, height, left, top, scale = _diagram_layout(
+        size_px,
+        margin_ft,
+        margin_x_ft,
+        margin_y_ft,
+    )
     image = np.full((height, width, 3), (18, 24, 30), dtype=np.uint8)
 
     court_left = round(left)
@@ -598,6 +626,8 @@ def draw_top_down_court(
             endpoints,
             size_px=size_px,
             margin_ft=margin_ft,
+            margin_x_ft=margin_x_ft,
+            margin_y_ft=margin_y_ft,
         )
         first = tuple(int(round(value)) for value in diagram_endpoints[0])
         second = tuple(int(round(value)) for value in diagram_endpoints[1])
@@ -616,12 +646,24 @@ def draw_top_down_court(
             point_array,
             size_px=size_px,
             margin_ft=margin_ft,
+            margin_x_ft=margin_x_ft,
+            margin_y_ft=margin_y_ft,
         )
         for court_point, diagram_point in zip(point_array, diagram_points):
             x, y = court_point
             if not np.isfinite(court_point).all() or not (
-                -margin_ft <= x <= 36.0 + margin_ft
-                and -margin_ft <= y <= 78.0 + margin_ft
+                -(
+                    margin_x_ft if margin_ft is None else margin_ft
+                )
+                <= x
+                <= 36.0
+                + (margin_x_ft if margin_ft is None else margin_ft)
+                and -(
+                    margin_y_ft if margin_ft is None else margin_ft
+                )
+                <= y
+                <= 78.0
+                + (margin_y_ft if margin_ft is None else margin_ft)
             ):
                 continue
             center = tuple(int(round(value)) for value in diagram_point)

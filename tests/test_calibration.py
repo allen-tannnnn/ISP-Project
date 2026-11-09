@@ -136,10 +136,10 @@ def test_draw_court_overlay_preserves_input_and_draws_on_copy():
 
 
 def test_top_down_court_has_expected_rgb_image_shape_and_dtype():
-    diagram = draw_top_down_court(size_px=(480, 900))
-    empty_points_diagram = draw_top_down_court([], size_px=(480, 900))
+    diagram = draw_top_down_court()
+    empty_points_diagram = draw_top_down_court([])
 
-    assert diagram.shape == (900, 480, 3)
+    assert diagram.shape == (1000, 480, 3)
     assert diagram.dtype == np.uint8
     np.testing.assert_array_equal(empty_points_diagram, diagram)
 
@@ -178,11 +178,48 @@ def test_top_down_court_skips_points_outside_court_and_margin():
     plain_diagram = draw_top_down_court(size_px=(480, 900))
 
     diagram = draw_top_down_court(
-        [(-7.0, 39.0), (43.0, 39.0), (18.0, 85.0)],
+        [(-7.0, 39.0), (43.0, 39.0), (18.0, 99.0)],
         size_px=(480, 900),
     )
 
     np.testing.assert_array_equal(diagram, plain_diagram)
+
+
+def test_default_margins_draw_points_behind_both_baselines():
+    plain_diagram = draw_top_down_court()
+    diagram = draw_top_down_court([(18.0, -15.0), (18.0, 93.0)])
+
+    for point in ((18.0, -15.0), (18.0, 93.0)):
+        pixel_x, pixel_y = court_to_diagram(point)
+        x, y = round(pixel_x), round(pixel_y)
+        assert np.any(
+            diagram[y - 5 : y + 6, x - 5 : x + 6]
+            != plain_diagram[y - 5 : y + 6, x - 5 : x + 6]
+        )
+
+
+def test_court_to_diagram_places_baselines_inside_extended_margins():
+    near_baseline, far_baseline, behind_near, behind_far = court_to_diagram(
+        [(18.0, 0.0), (18.0, 78.0), (18.0, -15.0), (18.0, 93.0)]
+    )
+
+    assert behind_near[1] > near_baseline[1]
+    assert behind_far[1] < far_baseline[1]
+    assert near_baseline[1] < 1000
+    assert far_baseline[1] > 0
+
+
+def test_legacy_margin_ft_sets_both_diagram_margins():
+    points = [(18.0, -5.0), (18.0, 83.0)]
+
+    np.testing.assert_array_equal(
+        draw_top_down_court(points, margin_ft=6),
+        draw_top_down_court(points, margin_x_ft=6, margin_y_ft=6),
+    )
+    np.testing.assert_allclose(
+        court_to_diagram(points, margin_ft=6),
+        court_to_diagram(points, margin_x_ft=6, margin_y_ft=6),
+    )
 
 
 def _saved_calibration():
