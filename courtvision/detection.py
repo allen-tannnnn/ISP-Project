@@ -1,11 +1,14 @@
 """Player detection and court-position filtering."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import TypedDict
 
 import numpy as np
+import pandas as pd
 
 from courtvision.calibration import pixel_to_court
+from courtvision.video_io import iter_frames, open_video
 
 
 class PlayerDetection(TypedDict):
@@ -138,3 +141,104 @@ def classify_detections(
         else:
             kept.append(mapped_detection)
     return kept, rejected
+
+
+def select_players(
+    kept: Sequence[CourtPlayerDetection],
+    max_players: int = 2,
+) -> list[CourtPlayerDetection]:
+    """Keep the highest-confidence detections expected for each court side."""
+    if isinstance(max_players, bool) or not isinstance(max_players, int):
+        raise ValueError("max_players must be a nonnegative integer.")
+    if max_players < 0:
+        raise ValueError("max_players must be a nonnegative integer.")
+
+    def confidence_order(detection: CourtPlayerDetection) -> float:
+        return detection["confidence"]
+
+    if max_players == 2:
+        near = sorted(
+            (d for d in kept if d["court_point"][1] < 39),
+            key=confidence_order,
+            reverse=True,
+        )
+        far = sorted(
+            (d for d in kept if d["court_point"][1] >= 39),
+            key=confidence_order,
+            reverse=True,
+        )
+        return near[:1] + far[:1]
+    if max_players == 4:
+        near = sorted(
+            (d for d in kept if d["court_point"][1] < 39),
+            key=confidence_order,
+            reverse=True,
+        )
+        far = sorted(
+            (d for d in kept if d["court_point"][1] >= 39),
+            key=confidence_order,
+            reverse=True,
+        )
+        return near[:2] + far[:2]
+    return sorted(kept, key=confidence_order, reverse=True)[:max_players]
+
+
+def process_video(
+    video_path: str | Path,
+    H: np.ndarray,
+    detector: PlayerDetector,
+    step: int = 3,
+    max_players: int = 2,
+    margin_x_ft: float = 4,
+    margin_y_ft: float = 25,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> pd.DataFrame:
+    """Detect players in sampled video frames and return court positions."""
+    if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+        raise ValueError("step must be a positive integer.")
+
+    capture, metadata = open_video(video_path)
+    total = (metadata.frame_count + step - 1) // step
+    rows: list[dict[str, int | float | str]] = []
+    done = 0
+    try:
+        for frame_index, frame in iter_frames(capture, skip_n=step):
+            detections = detector.detect_players(frame)
+            kept, _ = classify_detections(
+                detections,
+                H,
+                margin_x_ft=margin_x_ft,
+                margin_y_ft=margin_y_ft,
+            )
+            for detection in select_players(kept, max_players=max_players):
+                foot_x_px, foot_y_px = detection["foot_point"]
+                court_x_ft, court_y_ft = detection["court_point"]
+                rows.append(
+                    {
+                        "frame_index": frame_index,
+                        "time_sec": frame_index / metadata.fps,
+                        "side": "near" if court_y_ft < 39 else "far",
+                        "confidence": detection["confidence"],
+                        "foot_x_px": foot_x_px,
+                        "foot_y_px": foot_y_px,
+                        "court_x_ft": court_x_ft,
+                        "court_y_ft": court_y_ft,
+                    }
+                )
+            done += 1
+            if progress_callback is not None:
+                progress_callback(done, total)
+    finally:
+        capture.release()
+
+    columns = [
+        "frame_index",
+        "time_sec",
+        "side",
+        "confidence",
+        "foot_x_px",
+        "foot_y_px",
+        "court_x_ft",
+        "court_y_ft",
+    ]
+    return pd.DataFrame(rows, columns=columns)

@@ -25,7 +25,11 @@ from courtvision.calibration import (
     pixel_to_court,
     reprojection_error,
 )
-from courtvision.detection import PlayerDetector, classify_detections
+from courtvision.detection import (
+    PlayerDetector,
+    classify_detections,
+    process_video,
+)
 from courtvision.video_io import (
     VideoReadError,
     get_frame,
@@ -83,6 +87,8 @@ if uploaded_clip is None:
         Path(saved_path).unlink(missing_ok=True)
     st.session_state.pop("video_metadata", None)
     st.session_state.pop("upload_signature", None)
+    st.session_state.pop("detections_df", None)
+    st.session_state.pop("detections_frames_processed", None)
 else:
     size_mb = uploaded_clip.size / (1024 * 1024)
     st.success(f"Loaded **{uploaded_clip.name}** ({size_mb:.1f} MB).")
@@ -99,6 +105,8 @@ else:
         st.session_state.pop("video_metadata", None)
         st.session_state.pop("upload_signature", None)
         st.session_state.pop("frame_scrubber", None)
+        st.session_state.pop("detections_df", None)
+        st.session_state.pop("detections_frames_processed", None)
 
         try:
             with save_upload(uploaded_clip, delete_on_exit=False) as clip_path:
@@ -256,6 +264,8 @@ else:
                 st.session_state.pop("calibration_court_points", None)
                 st.session_state.pop("calibration_homography", None)
                 st.session_state.pop("player_detection_result", None)
+                st.session_state.pop("detections_df", None)
+                st.session_state.pop("detections_frames_processed", None)
                 st.session_state.pop("calibration_frame_index", None)
                 st.session_state.pop("calibration_error", None)
                 st.session_state["click_test_points"] = []
@@ -272,6 +282,8 @@ else:
                 st.session_state.pop("calibration_court_points", None)
                 st.session_state.pop("calibration_homography", None)
                 st.session_state.pop("player_detection_result", None)
+                st.session_state.pop("detections_df", None)
+                st.session_state.pop("detections_frames_processed", None)
                 st.session_state.pop("calibration_frame_index", None)
                 st.session_state.pop("calibration_error", None)
                 st.session_state["click_test_points"] = []
@@ -368,6 +380,8 @@ else:
                     )
                 except ValueError as error:
                     st.session_state.pop("calibration_homography", None)
+                    st.session_state.pop("detections_df", None)
+                    st.session_state.pop("detections_frames_processed", None)
                     st.session_state["calibration_error"] = str(error)
                     st.error(str(error))
                 else:
@@ -643,6 +657,68 @@ else:
                                     ),
                                     use_container_width=True,
                                 )
+
+                    st.subheader("Analyze full clip")
+                    frame_step = st.selectbox(
+                        "Frame step",
+                        options=(2, 3, 5, 10),
+                        index=2,
+                        key="full_clip_frame_step",
+                    )
+                    match_type = st.radio(
+                        "Match type",
+                        ("Singles", "Doubles"),
+                        key="full_clip_match_type",
+                    )
+                    if st.button("Analyze clip", key="analyze_full_clip"):
+                        st.session_state.pop("detections_df", None)
+                        st.session_state.pop("detections_frames_processed", None)
+                        progress_bar = st.progress(0.0)
+                        progress_state = {"done": 0}
+
+                        def update_progress(done: int, total: int) -> None:
+                            progress_state["done"] = done
+                            progress_bar.progress(
+                                done / total if total else 0.0
+                            )
+
+                        try:
+                            with st.spinner("Analyzing full clip..."):
+                                st.session_state["detections_df"] = process_video(
+                                    video_path,
+                                    st.session_state["calibration_homography"],
+                                    _cached_player_detector(),
+                                    step=frame_step,
+                                    max_players=2 if match_type == "Singles" else 4,
+                                    progress_callback=update_progress,
+                                )
+                            st.session_state["detections_frames_processed"] = (
+                                progress_state["done"]
+                            )
+                        except (VideoReadError, RuntimeError, ValueError) as error:
+                            st.error(f"Full clip analysis failed: {error}")
+
+                    detections_df = st.session_state.get("detections_df")
+                    if detections_df is not None:
+                        detected_sides = detections_df.groupby("frame_index")[
+                            "side"
+                        ].nunique()
+                        frames_with_both_players = int(
+                            (detected_sides == 2).sum()
+                        )
+                        st.caption(
+                            f"{len(detections_df):,} detections across "
+                            f"{st.session_state.get('detections_frames_processed', 0):,} "
+                            f"frames processed; both players detected in "
+                            f"{frames_with_both_players:,} frames."
+                        )
+                        st.download_button(
+                            "Download detections (CSV)",
+                            data=detections_df.to_csv(index=False),
+                            file_name="courtvision_detections.csv",
+                            mime="text/csv",
+                            key="download_detections_csv",
+                        )
 
         uploaded_clip.seek(0)
         st.video(uploaded_clip)
